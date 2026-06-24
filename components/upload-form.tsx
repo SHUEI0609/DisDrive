@@ -75,6 +75,50 @@ function uploadToDrive(
   });
 }
 
+function uploadToYouTube(
+  uploadUrl: string,
+  file: File,
+  onProgress: (progress: number) => void,
+): Promise<{ id: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    xhr.open("PUT", uploadUrl);
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      onProgress(event.loaded / event.total);
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText) as { id: string });
+        return;
+      }
+
+      reject(new Error(`YouTube upload failed: ${xhr.status} ${xhr.responseText}`));
+    };
+
+    xhr.onerror = () => reject(new Error("YouTube upload network error"));
+    xhr.send(file);
+  });
+}
+
+async function readJsonOrText(response: Response) {
+  const text = await response.text();
+
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return { message: text };
+  }
+}
+
 export function UploadForm({ token }: UploadFormProps) {
   const [info, setInfo] = useState<UploadInfo | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -144,27 +188,27 @@ export function UploadForm({ token }: UploadFormProps) {
         }),
       });
 
-      const uploadSession = await sessionResponse.json();
+      const uploadSession = await readJsonOrText(sessionResponse);
 
       if (!sessionResponse.ok) {
-        throw new Error(uploadSession.message ?? "アップロードセッションを作成できませんでした。");
+        throw new Error(String(uploadSession.message ?? "アップロードセッションを作成できませんでした。"));
       }
 
-      setFileId(uploadSession.fileId);
+      const uploadFileId = String(uploadSession.fileId);
+      const driveUploadUrl = String(uploadSession.uploadUrl);
+      const youtubeUploadUrl =
+        typeof uploadSession.youtubeUploadUrl === "string"
+          ? uploadSession.youtubeUploadUrl
+          : null;
+
+      setFileId(uploadFileId);
       setState("uploading");
 
       let driveFile: { id: string };
-      const shouldUseProxyUpload =
-        file.type.startsWith("video/") &&
-        process.env.NEXT_PUBLIC_YOUTUBE_UPLOAD_VIDEOS === "true";
 
       try {
-        if (shouldUseProxyUpload) {
-          throw new Error("YouTube連携のためサーバー経由でアップロードします。");
-        }
-
         driveFile = await uploadToDrive(
-          uploadSession.uploadUrl,
+          driveUploadUrl,
           file,
           setProgress,
         );
@@ -173,31 +217,40 @@ export function UploadForm({ token }: UploadFormProps) {
         setProgress(0);
 
         const fallbackFormData = new FormData();
-        fallbackFormData.set("fileId", uploadSession.fileId);
+        fallbackFormData.set("fileId", uploadFileId);
         fallbackFormData.set("file", file);
 
         const fallbackResponse = await fetch(`/api/uploads/${token}/proxy-upload`, {
           method: "POST",
           body: fallbackFormData,
         });
-        const fallbackPayload = await fallbackResponse.json();
+        const fallbackPayload = await readJsonOrText(fallbackResponse);
 
         if (!fallbackResponse.ok) {
           throw new Error(
-            fallbackPayload.message ??
+            String(
+              fallbackPayload.message ??
               (directUploadError instanceof Error
                 ? directUploadError.message
                 : "サーバー経由アップロードにも失敗しました。"),
+            ),
           );
         }
 
-        setFileId(fallbackPayload.fileId);
+        setFileId(String(fallbackPayload.fileId ?? uploadFileId));
         setProgress(1);
         setState("completed");
         return;
       }
 
       setState("verifying");
+      let youtubeVideo: { id: string } | null = null;
+
+      if (youtubeUploadUrl) {
+        youtubeVideo = await uploadToYouTube(youtubeUploadUrl, file, (youtubeProgress) => {
+          setProgress(0.5 + youtubeProgress * 0.5);
+        });
+      }
 
       const completeResponse = await fetch(`/api/uploads/${token}/complete`, {
         method: "POST",
@@ -205,18 +258,19 @@ export function UploadForm({ token }: UploadFormProps) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          fileId: uploadSession.fileId,
+          fileId: uploadFileId,
           driveFileId: driveFile.id,
+          youtubeVideoId: youtubeVideo?.id,
         }),
       });
 
-      const completePayload = await completeResponse.json();
+      const completePayload = await readJsonOrText(completeResponse);
 
       if (!completeResponse.ok) {
-        throw new Error(completePayload.message ?? "アップロード完了処理に失敗しました。");
+        throw new Error(String(completePayload.message ?? "アップロード完了処理に失敗しました。"));
       }
 
-      setFileId(completePayload.fileId);
+      setFileId(String(completePayload.fileId ?? uploadFileId));
       setProgress(1);
       setState("completed");
     } catch (err) {

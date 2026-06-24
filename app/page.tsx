@@ -1,8 +1,13 @@
 import { auth } from "@/lib/auth/auth";
 import { SignInButton } from "@/components/sign-in-button";
 
+export const dynamic = "force-dynamic";
+
 export default async function HomePage() {
-  const session = await auth();
+  const session = await auth().catch((error) => {
+    console.error("Failed to load session on home page", error);
+    return null;
+  });
 
   return (
     <main className="page">

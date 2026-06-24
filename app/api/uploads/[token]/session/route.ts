@@ -9,6 +9,7 @@ import { sanitizeFileName } from "@/lib/security/sanitize";
 import { hashUploadToken } from "@/lib/security/token";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getStorageProvider } from "@/lib/storage";
+import { createYouTubeUploadSession } from "@/lib/storage/youtube";
 
 type RouteContext = {
   params: Promise<{
@@ -87,6 +88,18 @@ export async function POST(request: NextRequest, context: RouteContext) {
       mimeType: input.mimeType,
       sizeBytes: input.sizeBytes,
     });
+    const isVideo = input.mimeType.startsWith("video/");
+    let youtubeSession: { uploadUrl: string; expiresAt: string } | null = null;
+
+    if (isVideo && env.YOUTUBE_UPLOAD_VIDEOS) {
+      youtubeSession = await createYouTubeUploadSession({
+        refreshToken,
+        title: storedName,
+        description: input.description ?? uploadSession.description,
+        mimeType: input.mimeType,
+        sizeBytes: input.sizeBytes,
+      });
+    }
 
     const { data: file, error: fileError } = await supabase
       .from("files")
@@ -135,6 +148,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     return Response.json({
       fileId: file.id,
       uploadUrl: storageSession.uploadUrl,
+      youtubeUploadUrl: youtubeSession?.uploadUrl ?? null,
       expiresAt: storageSession.expiresAt,
     });
   } catch (error) {

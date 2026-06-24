@@ -19,6 +19,7 @@ type RouteContext = {
 const requestSchema = z.object({
   fileId: z.string().uuid(),
   driveFileId: z.string().min(1),
+  youtubeVideoId: z.string().min(1).optional(),
 });
 
 export async function POST(request: NextRequest, context: RouteContext) {
@@ -94,17 +95,31 @@ export async function POST(request: NextRequest, context: RouteContext) {
     let discordMessageId: string | null = null;
 
     if (channel?.discord_channel_id) {
+      const youtubeUrl = input.youtubeVideoId
+        ? `https://youtu.be/${input.youtubeVideoId}`
+        : null;
       const message = await postDiscordChannelMessage(channel.discord_channel_id, {
         content: [
           "ファイルを保存しました",
           `ファイル名: ${file.display_name}`,
           `サイズ: ${formatBytes(file.size_bytes)}`,
           `投稿者: <@${session.discordUserId}>`,
+          ...(youtubeUrl ? ["", youtubeUrl] : []),
         ].join("\n"),
         components: [
           {
             type: 1,
             components: [
+              ...(youtubeUrl
+                ? [
+                    {
+                      type: 2,
+                      style: 5,
+                      label: "YouTubeで再生",
+                      url: youtubeUrl,
+                    },
+                  ]
+                : []),
               {
                 type: 2,
                 style: 5,
@@ -140,12 +155,14 @@ export async function POST(request: NextRequest, context: RouteContext) {
         driveFileId: input.driveFileId,
         driveName: metadata.name,
         driveSizeBytes: metadata.sizeBytes,
+        youtubeVideoId: input.youtubeVideoId ?? null,
       },
     });
 
     return Response.json({
       fileId: input.fileId,
       driveFileId: input.driveFileId,
+      youtubeVideoId: input.youtubeVideoId ?? null,
     });
   } catch (error) {
     return errorResponse(error);
