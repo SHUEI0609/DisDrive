@@ -45,6 +45,8 @@ const stateLabels: Record<ViewState, string> = {
   failed: "エラー",
 };
 
+const maxProxyUploadBytes = 4 * 1024 * 1024;
+
 function uploadToDrive(
   uploadUrl: string,
   file: File,
@@ -213,6 +215,14 @@ export function UploadForm({ token }: UploadFormProps) {
           setProgress,
         );
       } catch (directUploadError) {
+        if (file.size > maxProxyUploadBytes) {
+          throw new Error(
+            directUploadError instanceof Error
+              ? `Google Driveへの直接アップロードに失敗しました。Vercel本番では${formatBytes(maxProxyUploadBytes)}を超えるファイルをサーバー経由で送れません。時間を置いて再試行するか、別ブラウザで開いてください。詳細: ${directUploadError.message}`
+              : `Google Driveへの直接アップロードに失敗しました。Vercel本番では${formatBytes(maxProxyUploadBytes)}を超えるファイルをサーバー経由で送れません。`,
+          );
+        }
+
         setState("proxy_uploading");
         setProgress(0);
 
