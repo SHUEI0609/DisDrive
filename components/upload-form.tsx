@@ -47,8 +47,8 @@ const stateLabels: Record<ViewState, string> = {
 };
 
 const maxProxyUploadBytes = 4 * 1024 * 1024;
-const uploadChunkBytes = 8 * 1024 * 1024;
-const maxChunkUploadRetries = 3;
+const uploadChunkBytes = 1024 * 1024;
+const maxChunkUploadRetries = 5;
 
 type UploadTarget = "Google Drive" | "YouTube";
 
@@ -83,6 +83,7 @@ function uploadChunk(
     const endInclusive = endExclusive - 1;
 
     xhr.open("PUT", uploadUrl);
+    xhr.timeout = 120_000;
     xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
     xhr.setRequestHeader(
       "Content-Range",
@@ -102,8 +103,20 @@ function uploadChunk(
       });
     };
 
-    xhr.onerror = () => reject(new Error("Network error"));
-    xhr.ontimeout = () => reject(new Error("Upload timed out"));
+    xhr.onerror = () => {
+      reject(
+        new Error(
+          `Network error while sending ${formatBytes(start)}-${formatBytes(endExclusive)}`,
+        ),
+      );
+    };
+    xhr.ontimeout = () => {
+      reject(
+        new Error(
+          `Upload timed out while sending ${formatBytes(start)}-${formatBytes(endExclusive)}`,
+        ),
+      );
+    };
     xhr.send(chunk);
   });
 }
@@ -280,8 +293,8 @@ export function UploadForm({ token }: UploadFormProps) {
         if (file.size > maxProxyUploadBytes) {
           throw new Error(
             directUploadError instanceof Error
-              ? `Google Driveへの直接アップロードに失敗しました。Vercel本番では${formatBytes(maxProxyUploadBytes)}を超えるファイルをサーバー経由で送れません。時間を置いて再試行するか、別ブラウザで開いてください。詳細: ${directUploadError.message}`
-              : `Google Driveへの直接アップロードに失敗しました。Vercel本番では${formatBytes(maxProxyUploadBytes)}を超えるファイルをサーバー経由で送れません。`,
+              ? `Google Driveへの直接アップロードに失敗しました。${formatBytes(maxProxyUploadBytes)}を超えるファイルはVercel経由に切り替えず、Googleへ直接送る必要があります。Chrome/Safariなど別ブラウザで開いて再試行してください。詳細: ${directUploadError.message}`
+              : `Google Driveへの直接アップロードに失敗しました。Chrome/Safariなど別ブラウザで開いて再試行してください。`,
           );
         }
 
