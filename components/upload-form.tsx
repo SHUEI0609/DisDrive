@@ -147,7 +147,9 @@ async function uploadResumable(
           break;
         }
 
-        throw new Error(`${target} upload failed: ${result.status} ${result.responseText}`);
+        throw new Error(
+          `${target} upload failed at ${formatBytes(start)}-${formatBytes(endExclusive)}: ${result.status} ${result.responseText}`,
+        );
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(`${target} upload failed.`);
 
@@ -314,11 +316,19 @@ export function UploadForm({ token }: UploadFormProps) {
 
       setState("verifying");
       let youtubeVideo: { id: string } | null = null;
+      let youtubeUploadError: string | null = null;
 
       if (youtubeUploadUrl) {
-        youtubeVideo = await uploadResumable(youtubeUploadUrl, file, "YouTube", (youtubeProgress) => {
-          setProgress(0.5 + youtubeProgress * 0.5);
-        });
+        try {
+          youtubeVideo = await uploadResumable(youtubeUploadUrl, file, "YouTube", (youtubeProgress) => {
+            setProgress(0.5 + youtubeProgress * 0.5);
+          });
+        } catch (youtubeError) {
+          youtubeUploadError =
+            youtubeError instanceof Error
+              ? youtubeError.message
+              : "YouTubeアップロードに失敗しました。";
+        }
       }
 
       const completeResponse = await fetch(`/api/uploads/${token}/complete`, {
@@ -330,6 +340,7 @@ export function UploadForm({ token }: UploadFormProps) {
           fileId: uploadFileId,
           driveFileId: driveFile.id,
           youtubeVideoId: youtubeVideo?.id,
+          youtubeUploadError,
         }),
       });
 

@@ -20,6 +20,7 @@ const requestSchema = z.object({
   fileId: z.string().uuid(),
   driveFileId: z.string().min(1),
   youtubeVideoId: z.string().min(1).optional(),
+  youtubeUploadError: z.string().max(1000).nullable().optional(),
 });
 
 export async function POST(request: NextRequest, context: RouteContext) {
@@ -105,6 +106,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
           `サイズ: ${formatBytes(file.size_bytes)}`,
           `投稿者: <@${session.discordUserId}>`,
           ...(youtubeUrl ? ["", youtubeUrl] : []),
+          ...(input.youtubeUploadError
+            ? ["", `YouTubeアップロード失敗: ${input.youtubeUploadError}`]
+            : []),
         ].join("\n"),
         components: [
           {
@@ -156,6 +160,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
         driveName: metadata.name,
         driveSizeBytes: metadata.sizeBytes,
         youtubeVideoId: input.youtubeVideoId ?? null,
+        youtubeUploadError: input.youtubeUploadError ?? null,
       },
     });
 
@@ -163,6 +168,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       fileId: input.fileId,
       driveFileId: input.driveFileId,
       youtubeVideoId: input.youtubeVideoId ?? null,
+      youtubeUploadError: input.youtubeUploadError ?? null,
     });
   } catch (error) {
     return errorResponse(error);
