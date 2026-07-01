@@ -47,8 +47,8 @@ const stateLabels: Record<ViewState, string> = {
 };
 
 const maxProxyUploadBytes = 4 * 1024 * 1024;
-const uploadChunkBytes = 1024 * 1024;
-const maxChunkUploadRetries = 5;
+const uploadChunkBytes = 512 * 1024;
+const maxChunkUploadRetries = 8;
 
 type UploadTarget = "Google Drive" | "YouTube";
 type SavedUploadStage = "drive" | "youtube" | "complete";
@@ -144,7 +144,7 @@ function uploadChunk(
     const endInclusive = endExclusive - 1;
 
     xhr.open("PUT", uploadUrl);
-    xhr.timeout = 120_000;
+    xhr.timeout = 180_000;
     xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
     xhr.setRequestHeader(
       "Content-Range",
@@ -297,6 +297,28 @@ async function uploadResumable(
         );
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(`${target} upload failed.`);
+
+        try {
+          const status = await queryUploadStatus(uploadUrl, file, target);
+
+          if (status.completedId) {
+            onProgress(1);
+            options?.onUploadedBytes?.(file.size);
+            return { id: status.completedId };
+          }
+
+          if (status.nextStart > start) {
+            start = status.nextStart;
+            onProgress(Math.min(start / file.size, 0.999));
+            options?.onUploadedBytes?.(start);
+            lastError = null;
+            break;
+          }
+        } catch {
+          // Keep the original upload error. Some mobile in-app browsers report a
+          // network error even when Google accepted the chunk, so the status
+          // check above is best-effort and should not hide the real failure.
+        }
 
         if (attempt < maxChunkUploadRetries) {
           await sleep(750 * attempt);
