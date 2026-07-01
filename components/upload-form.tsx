@@ -51,6 +51,67 @@ const uploadChunkBytes = 1024 * 1024;
 const maxChunkUploadRetries = 5;
 
 type UploadTarget = "Google Drive" | "YouTube";
+type SavedUploadStage = "drive" | "youtube" | "complete";
+type SavedUploadState = {
+  version: 1;
+  token: string;
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  fileType: string;
+  fileLastModified: number;
+  driveUploadUrl: string;
+  youtubeUploadUrl: string | null;
+  driveFileId?: string;
+  youtubeVideoId?: string;
+  youtubeUploadError?: string | null;
+  stage: SavedUploadStage;
+  uploadedBytes: number;
+  updatedAt: number;
+};
+
+function savedUploadKey(token: string) {
+  return `discord-cloud-file-bot:upload:${token}`;
+}
+
+function fileMatchesSavedUpload(file: File, savedUpload: SavedUploadState) {
+  return (
+    file.name === savedUpload.fileName &&
+    file.size === savedUpload.fileSize &&
+    file.type === savedUpload.fileType &&
+    file.lastModified === savedUpload.fileLastModified
+  );
+}
+
+function loadSavedUpload(token: string) {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const raw = window.localStorage.getItem(savedUploadKey(token));
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as SavedUploadState;
+    if (parsed.version !== 1 || parsed.token !== token) return null;
+
+    return {
+      ...parsed,
+      uploadedBytes: parsed.uploadedBytes ?? 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistSavedUpload(token: string, savedUpload: SavedUploadState | null) {
+  if (typeof window === "undefined") return;
+
+  if (!savedUpload) {
+    window.localStorage.removeItem(savedUploadKey(token));
+    return;
+  }
+
+  window.localStorage.setItem(savedUploadKey(token), JSON.stringify(savedUpload));
+}
 
 function parseUploadedId(responseText: string, target: UploadTarget) {
   if (!responseText) {
@@ -121,6 +182,57 @@ function uploadChunk(
   });
 }
 
+function queryUploadStatus(
+  uploadUrl: string,
+  file: File,
+  target: UploadTarget,
+): Promise<{ completedId?: string; nextStart: number }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    xhr.open("PUT", uploadUrl);
+    xhr.timeout = 60_000;
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.setRequestHeader("Content-Range", `bytes */${file.size}`);
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve({
+            completedId: parseUploadedId(xhr.responseText, target).id,
+            nextStart: file.size,
+          });
+        } catch (error) {
+          reject(error);
+        }
+        return;
+      }
+
+      if (xhr.status === 308) {
+        resolve({
+          nextStart: nextStartFromRange(xhr.getResponseHeader("Range"), 0),
+        });
+        return;
+      }
+
+      reject(
+        new Error(
+          `${target} upload resume check failed: ${xhr.status} ${xhr.responseText}`,
+        ),
+      );
+    };
+
+    xhr.onerror = () => {
+      reject(new Error(`${target} upload resume check failed with a network error.`));
+    };
+    xhr.ontimeout = () => {
+      reject(new Error(`${target} upload resume check timed out.`));
+    };
+
+    xhr.send();
+  });
+}
+
 function nextStartFromRange(range: string | null | undefined, fallback: number) {
   const match = range?.match(/bytes=0-(\d+)/);
 
@@ -136,8 +248,26 @@ async function uploadResumable(
   file: File,
   target: UploadTarget,
   onProgress: (progress: number) => void,
+  options?: {
+    resume?: boolean;
+    onUploadedBytes?: (uploadedBytes: number) => void;
+  },
 ): Promise<{ id: string }> {
   let start = 0;
+
+  if (options?.resume) {
+    const status = await queryUploadStatus(uploadUrl, file, target);
+
+    if (status.completedId) {
+      onProgress(1);
+      options.onUploadedBytes?.(file.size);
+      return { id: status.completedId };
+    }
+
+    start = status.nextStart;
+    onProgress(Math.min(start / file.size, 0.999));
+    options.onUploadedBytes?.(start);
+  }
 
   while (start < file.size) {
     const endExclusive = Math.min(start + uploadChunkBytes, file.size);
@@ -157,6 +287,7 @@ async function uploadResumable(
         if (result.status === 308) {
           start = nextStartFromRange(result.range, endExclusive);
           onProgress(Math.min(start / file.size, 0.999));
+          options?.onUploadedBytes?.(start);
           lastError = null;
           break;
         }
@@ -203,11 +334,29 @@ export function UploadForm({ token }: UploadFormProps) {
   const [state, setState] = useState<ViewState>("validating");
   const [error, setError] = useState<string | null>(null);
   const [fileId, setFileId] = useState<string | null>(null);
+  const [savedUpload, setSavedUpload] = useState<SavedUploadState | null>(null);
 
   const canSubmit = useMemo(
-    () => state === "ready" && Boolean(file) && Boolean(info?.googleConnected),
+    () =>
+      (state === "ready" || state === "failed") &&
+      Boolean(file) &&
+      Boolean(info?.googleConnected),
     [file, info?.googleConnected, state],
   );
+  const canResume = useMemo(
+    () =>
+      state === "failed" &&
+      Boolean(file) &&
+      Boolean(savedUpload) &&
+      Boolean(info?.googleConnected) &&
+      fileMatchesSavedUpload(file as File, savedUpload as SavedUploadState),
+    [file, info?.googleConnected, savedUpload, state],
+  );
+
+  function saveUploadState(nextSavedUpload: SavedUploadState | null) {
+    setSavedUpload(nextSavedUpload);
+    persistSavedUpload(token, nextSavedUpload);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -241,54 +390,102 @@ export function UploadForm({ token }: UploadFormProps) {
     };
   }, [token]);
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  useEffect(() => {
+    setSavedUpload(loadSavedUpload(token));
+  }, [token]);
 
+  async function runUpload(resumeFrom?: SavedUploadState) {
     if (!file) return;
-
     setError(null);
-    setProgress(0);
-    setState("creating_session");
+    setProgress(resumeFrom ? progress : 0);
 
     try {
-      const sessionResponse = await fetch(`/api/uploads/${token}/session`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          fileName: file.name,
-          mimeType: file.type || "application/octet-stream",
-          sizeBytes: file.size,
-          description,
-        }),
-      });
+      let activeUpload = resumeFrom;
 
-      const uploadSession = await readJsonOrText(sessionResponse);
-
-      if (!sessionResponse.ok) {
-        throw new Error(String(uploadSession.message ?? "アップロードセッションを作成できませんでした。"));
+      if (activeUpload && !fileMatchesSavedUpload(file, activeUpload)) {
+        throw new Error("前回と同じファイルを選択してから続きから再開してください。");
       }
 
-      const uploadFileId = String(uploadSession.fileId);
-      const driveUploadUrl = String(uploadSession.uploadUrl);
-      const youtubeUploadUrl =
-        typeof uploadSession.youtubeUploadUrl === "string"
-          ? uploadSession.youtubeUploadUrl
-          : null;
+      if (!activeUpload) {
+        setState("creating_session");
 
-      setFileId(uploadFileId);
+        const sessionResponse = await fetch(`/api/uploads/${token}/session`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            fileName: file.name,
+            mimeType: file.type || "application/octet-stream",
+            sizeBytes: file.size,
+            description,
+          }),
+        });
+
+        const uploadSession = await readJsonOrText(sessionResponse);
+
+        if (!sessionResponse.ok) {
+          throw new Error(String(uploadSession.message ?? "アップロードセッションを作成できませんでした。"));
+        }
+
+        activeUpload = {
+          version: 1,
+          token,
+          fileId: String(uploadSession.fileId),
+          fileName: file.name,
+          fileSize: file.size,
+          fileType: file.type,
+          fileLastModified: file.lastModified,
+          driveUploadUrl: String(uploadSession.uploadUrl),
+          youtubeUploadUrl:
+            typeof uploadSession.youtubeUploadUrl === "string"
+              ? uploadSession.youtubeUploadUrl
+              : null,
+          stage: "drive",
+          uploadedBytes: 0,
+          updatedAt: Date.now(),
+        };
+        saveUploadState(activeUpload);
+      }
+
+      setFileId(activeUpload.fileId);
       setState("uploading");
 
       let driveFile: { id: string };
 
       try {
-        driveFile = await uploadResumable(
-          driveUploadUrl,
-          file,
-          "Google Drive",
-          setProgress,
-        );
+        if (activeUpload.stage === "drive") {
+          driveFile = await uploadResumable(
+            activeUpload.driveUploadUrl,
+            file,
+            "Google Drive",
+            setProgress,
+            {
+              resume: Boolean(resumeFrom),
+              onUploadedBytes: (uploadedBytes) => {
+                if (!activeUpload) return;
+                saveUploadState({
+                  ...activeUpload,
+                  stage: "drive",
+                  uploadedBytes,
+                  updatedAt: Date.now(),
+                });
+              },
+            },
+          );
+          activeUpload = {
+            ...activeUpload,
+            driveFileId: driveFile.id,
+            stage: activeUpload.youtubeUploadUrl ? "youtube" : "complete",
+            uploadedBytes: file.size,
+            updatedAt: Date.now(),
+          };
+          saveUploadState(activeUpload);
+        } else if (activeUpload.driveFileId) {
+          driveFile = { id: activeUpload.driveFileId };
+        } else {
+          throw new Error("再開に必要なGoogle Drive保存情報が見つかりません。");
+        }
       } catch (directUploadError) {
         if (file.size > maxProxyUploadBytes) {
           throw new Error(
@@ -302,7 +499,7 @@ export function UploadForm({ token }: UploadFormProps) {
         setProgress(0);
 
         const fallbackFormData = new FormData();
-        fallbackFormData.set("fileId", uploadFileId);
+        fallbackFormData.set("fileId", activeUpload.fileId);
         fallbackFormData.set("file", file);
 
         const fallbackResponse = await fetch(`/api/uploads/${token}/proxy-upload`, {
@@ -322,8 +519,9 @@ export function UploadForm({ token }: UploadFormProps) {
           );
         }
 
-        setFileId(String(fallbackPayload.fileId ?? uploadFileId));
+        setFileId(String(fallbackPayload.fileId ?? activeUpload.fileId));
         setProgress(1);
+        saveUploadState(null);
         setState("completed");
         return;
       }
@@ -332,16 +530,54 @@ export function UploadForm({ token }: UploadFormProps) {
       let youtubeVideo: { id: string } | null = null;
       let youtubeUploadError: string | null = null;
 
-      if (youtubeUploadUrl) {
+      if (activeUpload.youtubeUploadUrl) {
         try {
-          youtubeVideo = await uploadResumable(youtubeUploadUrl, file, "YouTube", (youtubeProgress) => {
-            setProgress(0.5 + youtubeProgress * 0.5);
-          });
+          if (activeUpload.stage === "youtube") {
+            youtubeVideo = await uploadResumable(
+              activeUpload.youtubeUploadUrl,
+              file,
+              "YouTube",
+              (youtubeProgress) => {
+                setProgress(0.5 + youtubeProgress * 0.5);
+              },
+              {
+                resume: Boolean(resumeFrom),
+                onUploadedBytes: (uploadedBytes) => {
+                  if (!activeUpload) return;
+                  saveUploadState({
+                    ...activeUpload,
+                    stage: "youtube",
+                    uploadedBytes,
+                    updatedAt: Date.now(),
+                  });
+                },
+              },
+            );
+            activeUpload = {
+              ...activeUpload,
+              youtubeVideoId: youtubeVideo.id,
+              youtubeUploadError: null,
+              stage: "complete",
+              uploadedBytes: file.size,
+              updatedAt: Date.now(),
+            };
+            saveUploadState(activeUpload);
+          } else if (activeUpload.youtubeVideoId) {
+            youtubeVideo = { id: activeUpload.youtubeVideoId };
+          }
         } catch (youtubeError) {
           youtubeUploadError =
             youtubeError instanceof Error
               ? youtubeError.message
               : "YouTubeアップロードに失敗しました。";
+          activeUpload = {
+            ...activeUpload,
+            youtubeUploadError,
+            stage: "complete",
+            uploadedBytes: file.size,
+            updatedAt: Date.now(),
+          };
+          saveUploadState(activeUpload);
         }
       }
 
@@ -351,10 +587,10 @@ export function UploadForm({ token }: UploadFormProps) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          fileId: uploadFileId,
+          fileId: activeUpload.fileId,
           driveFileId: driveFile.id,
           youtubeVideoId: youtubeVideo?.id,
-          youtubeUploadError,
+          youtubeUploadError: youtubeUploadError ?? activeUpload.youtubeUploadError,
         }),
       });
 
@@ -364,13 +600,24 @@ export function UploadForm({ token }: UploadFormProps) {
         throw new Error(String(completePayload.message ?? "アップロード完了処理に失敗しました。"));
       }
 
-      setFileId(String(completePayload.fileId ?? uploadFileId));
+      setFileId(String(completePayload.fileId ?? activeUpload.fileId));
       setProgress(1);
+      saveUploadState(null);
       setState("completed");
     } catch (err) {
       setError(err instanceof Error ? err.message : "アップロードに失敗しました。");
       setState("failed");
     }
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await runUpload();
+  }
+
+  async function handleResume() {
+    if (!savedUpload) return;
+    await runUpload(savedUpload);
   }
 
   return (
@@ -392,8 +639,13 @@ export function UploadForm({ token }: UploadFormProps) {
           <input
             className="input"
             type="file"
-            disabled={state !== "ready"}
-            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            disabled={state !== "ready" && state !== "failed"}
+            onChange={(event) => {
+              setFile(event.target.files?.[0] ?? null);
+              if (state === "failed") {
+                setError(null);
+              }
+            }}
           />
         </label>
 
@@ -406,7 +658,7 @@ export function UploadForm({ token }: UploadFormProps) {
           <textarea
             className="textarea"
             value={description}
-            disabled={state !== "ready"}
+            disabled={state !== "ready" && state !== "failed"}
             onChange={(event) => setDescription(event.target.value)}
           />
         </label>
@@ -454,14 +706,36 @@ export function UploadForm({ token }: UploadFormProps) {
 
         {error ? <p className="status danger">{error}</p> : null}
 
+        {savedUpload && state !== "completed" ? (
+          <div className="panel-subtle stack">
+            <strong>途中のアップロードがあります</strong>
+            <span className="muted">
+              {savedUpload.fileName} / {formatBytes(savedUpload.fileSize)}
+            </span>
+            <span className="muted">
+              保存済み位置: {formatBytes(savedUpload.uploadedBytes)} 付近
+            </span>
+            <span className="muted">
+              同じファイルを選択すると、Googleに確認して最後の送信位置から再開します。
+            </span>
+          </div>
+        ) : null}
+
         {state === "completed" && fileId ? (
           <a className="button primary" href={`/files/${fileId}`}>
             詳細を開く
           </a>
         ) : (
-          <button className="button primary" type="submit" disabled={!canSubmit}>
-            アップロード開始
-          </button>
+          <div className="button-row">
+            {canResume ? (
+              <button className="button primary" type="button" onClick={handleResume}>
+                続きから再開
+              </button>
+            ) : null}
+            <button className="button primary" type="submit" disabled={!canSubmit}>
+              アップロード開始
+            </button>
+          </div>
         )}
       </form>
 
