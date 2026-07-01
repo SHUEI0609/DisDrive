@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth/auth";
-import { SignInButton } from "@/components/sign-in-button";
+import { AccountActions } from "@/components/account-actions";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 
@@ -8,6 +9,26 @@ export default async function HomePage() {
     console.error("Failed to load session on home page", error);
     return null;
   });
+  let googleAccount: { email: string | null; scope: string | null } | null = null;
+
+  if (session?.discordUserId) {
+    const supabase = createAdminClient();
+    const { data: user } = await supabase
+      .from("users")
+      .select("id")
+      .eq("discord_user_id", session.discordUserId)
+      .single();
+
+    if (user?.id) {
+      const { data } = await supabase
+        .from("google_accounts")
+        .select("email,scope")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      googleAccount = data;
+    }
+  }
 
   return (
     <main className="page">
@@ -22,7 +43,11 @@ export default async function HomePage() {
             </p>
           </div>
           <div className="button-row">
-            <SignInButton signedIn={Boolean(session?.user)} />
+            <AccountActions
+              signedIn={Boolean(session?.user)}
+              googleConnected={Boolean(googleAccount)}
+              returnTo="/"
+            />
           </div>
         </section>
 
@@ -36,6 +61,16 @@ export default async function HomePage() {
             <div className="meta-row">
               <dt>ユーザー</dt>
               <dd>{session?.user?.name ?? "-"}</dd>
+            </div>
+            <div className="meta-row">
+              <dt>Google</dt>
+              <dd>{googleAccount?.email ?? "未連携"}</dd>
+            </div>
+            <div className="meta-row">
+              <dt>YouTube権限</dt>
+              <dd>
+                {googleAccount?.scope?.includes("youtube.upload") ? "あり" : "未確認"}
+              </dd>
             </div>
           </dl>
         </aside>

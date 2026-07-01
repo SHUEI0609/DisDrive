@@ -3,7 +3,7 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Discord Cloud File Bot",
+  title: "Discord Cloud",
   description: "Discordから大容量ファイルを安全にアップロードするMVP",
 };
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { AccountActions } from "@/components/account-actions";
 import { formatBytes } from "@/lib/files/format";
 
 type UploadInfo = {
@@ -415,6 +416,22 @@ export function UploadForm({ token }: UploadFormProps) {
             >
               Google Driveを連携
             </a>
+          </div>
+        ) : null}
+
+        {info?.googleConnected ? (
+          <div className="panel-subtle stack">
+            <strong>アカウント操作</strong>
+            <span className="muted">
+              `invalid_grant` が出た場合はGoogle再認証を行ってください。
+            </span>
+            <div className="button-row">
+              <AccountActions
+                signedIn
+                googleConnected={Boolean(info.googleConnected)}
+                returnTo={`/upload/${token}`}
+              />
+            </div>
           </div>
         ) : null}
 
