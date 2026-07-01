@@ -365,6 +365,30 @@ async function recoverDriveFileId(token: string, fileId: string) {
   return payload.driveFileId;
 }
 
+async function uploadYouTubeFromDrive(input: {
+  token: string;
+  fileId: string;
+  driveFileId: string;
+}) {
+  const response = await fetch(`/api/uploads/${input.token}/youtube-from-drive`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      fileId: input.fileId,
+      driveFileId: input.driveFileId,
+    }),
+  });
+  const payload = await readJsonOrText(response);
+
+  if (!response.ok || typeof payload.youtubeVideoId !== "string") {
+    throw new Error(String(payload.message ?? "YouTubeアップロードに失敗しました。"));
+  }
+
+  return { id: payload.youtubeVideoId };
+}
+
 export function UploadForm({ token }: UploadFormProps) {
   const [info, setInfo] = useState<UploadInfo | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -586,26 +610,12 @@ export function UploadForm({ token }: UploadFormProps) {
       if (activeUpload.youtubeUploadUrl) {
         try {
           if (activeUpload.stage === "youtube") {
-            youtubeVideo = await uploadResumable(
-              activeUpload.youtubeUploadUrl,
-              file,
-              "YouTube",
-              (youtubeProgress) => {
-                setProgress(0.5 + youtubeProgress * 0.5);
-              },
-              {
-                resume: Boolean(resumeFrom),
-                onUploadedBytes: (uploadedBytes) => {
-                  if (!activeUpload) return;
-                  saveUploadState({
-                    ...activeUpload,
-                    stage: "youtube",
-                    uploadedBytes,
-                    updatedAt: Date.now(),
-                  });
-                },
-              },
-            );
+            setProgress(0.95);
+            youtubeVideo = await uploadYouTubeFromDrive({
+              token,
+              fileId: activeUpload.fileId,
+              driveFileId: driveFile.id,
+            });
             activeUpload = {
               ...activeUpload,
               youtubeVideoId: youtubeVideo.id,

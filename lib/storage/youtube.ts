@@ -22,6 +22,22 @@ export async function uploadUnlistedYouTubeVideo(input: {
   mimeType: string;
   bytes: Buffer;
 }) {
+  return uploadUnlistedYouTubeVideoStream({
+    refreshToken: input.refreshToken,
+    title: input.title,
+    description: input.description,
+    mimeType: input.mimeType,
+    body: Readable.from(input.bytes),
+  });
+}
+
+export async function uploadUnlistedYouTubeVideoStream(input: {
+  refreshToken: string;
+  title: string;
+  description?: string | null;
+  mimeType: string;
+  body: Readable;
+}) {
   const youtube = google.youtube({
     version: "v3",
     auth: createOAuthClient(input.refreshToken),
@@ -40,7 +56,7 @@ export async function uploadUnlistedYouTubeVideo(input: {
     },
     media: {
       mimeType: input.mimeType,
-      body: Readable.from(input.bytes),
+      body: input.body,
     },
   });
 
