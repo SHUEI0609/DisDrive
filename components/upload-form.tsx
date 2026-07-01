@@ -348,6 +348,23 @@ async function readJsonOrText(response: Response) {
   }
 }
 
+async function recoverDriveFileId(token: string, fileId: string) {
+  const response = await fetch(`/api/uploads/${token}/recover`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ fileId }),
+  });
+  const payload = await readJsonOrText(response);
+
+  if (!response.ok || typeof payload.driveFileId !== "string") {
+    return null;
+  }
+
+  return payload.driveFileId;
+}
+
 export function UploadForm({ token }: UploadFormProps) {
   const [info, setInfo] = useState<UploadInfo | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -510,42 +527,56 @@ export function UploadForm({ token }: UploadFormProps) {
         }
       } catch (directUploadError) {
         if (file.size > maxProxyUploadBytes) {
+          const recoveredDriveFileId = await recoverDriveFileId(token, activeUpload.fileId);
+
+          if (recoveredDriveFileId) {
+            driveFile = { id: recoveredDriveFileId };
+            activeUpload = {
+              ...activeUpload,
+              driveFileId: recoveredDriveFileId,
+              stage: activeUpload.youtubeUploadUrl ? "youtube" : "complete",
+              uploadedBytes: file.size,
+              updatedAt: Date.now(),
+            };
+            saveUploadState(activeUpload);
+          } else {
           throw new Error(
             directUploadError instanceof Error
-              ? `Google Driveへの直接アップロードに失敗しました。${formatBytes(maxProxyUploadBytes)}を超えるファイルはVercel経由に切り替えず、Googleへ直接送る必要があります。Chrome/Safariなど別ブラウザで開いて再試行してください。詳細: ${directUploadError.message}`
+              ? `Google Driveへの直接アップロードに失敗しました。${formatBytes(maxProxyUploadBytes)}を超えるファイルはVercel経由に切り替えず、Googleへ直接送る必要があります。続きから再開を押してください。詳細: ${directUploadError.message}`
               : `Google Driveへの直接アップロードに失敗しました。Chrome/Safariなど別ブラウザで開いて再試行してください。`,
           );
+          }
+        } else {
+          setState("proxy_uploading");
+          setProgress(0);
+
+          const fallbackFormData = new FormData();
+          fallbackFormData.set("fileId", activeUpload.fileId);
+          fallbackFormData.set("file", file);
+
+          const fallbackResponse = await fetch(`/api/uploads/${token}/proxy-upload`, {
+            method: "POST",
+            body: fallbackFormData,
+          });
+          const fallbackPayload = await readJsonOrText(fallbackResponse);
+
+          if (!fallbackResponse.ok) {
+            throw new Error(
+              String(
+                fallbackPayload.message ??
+                (directUploadError instanceof Error
+                  ? directUploadError.message
+                  : "サーバー経由アップロードにも失敗しました。"),
+              ),
+            );
+          }
+
+          setFileId(String(fallbackPayload.fileId ?? activeUpload.fileId));
+          setProgress(1);
+          saveUploadState(null);
+          setState("completed");
+          return;
         }
-
-        setState("proxy_uploading");
-        setProgress(0);
-
-        const fallbackFormData = new FormData();
-        fallbackFormData.set("fileId", activeUpload.fileId);
-        fallbackFormData.set("file", file);
-
-        const fallbackResponse = await fetch(`/api/uploads/${token}/proxy-upload`, {
-          method: "POST",
-          body: fallbackFormData,
-        });
-        const fallbackPayload = await readJsonOrText(fallbackResponse);
-
-        if (!fallbackResponse.ok) {
-          throw new Error(
-            String(
-              fallbackPayload.message ??
-              (directUploadError instanceof Error
-                ? directUploadError.message
-                : "サーバー経由アップロードにも失敗しました。"),
-            ),
-          );
-        }
-
-        setFileId(String(fallbackPayload.fileId ?? activeUpload.fileId));
-        setProgress(1);
-        saveUploadState(null);
-        setState("completed");
-        return;
       }
 
       setState("verifying");
