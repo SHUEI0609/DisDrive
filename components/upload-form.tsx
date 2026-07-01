@@ -46,65 +46,123 @@ const stateLabels: Record<ViewState, string> = {
 };
 
 const maxProxyUploadBytes = 4 * 1024 * 1024;
+const uploadChunkBytes = 8 * 1024 * 1024;
+const maxChunkUploadRetries = 3;
 
-function uploadToDrive(
+type UploadTarget = "Google Drive" | "YouTube";
+
+function parseUploadedId(responseText: string, target: UploadTarget) {
+  if (!responseText) {
+    throw new Error(`${target} upload completed without a response body.`);
+  }
+
+  const payload = JSON.parse(responseText) as { id?: string };
+
+  if (!payload.id) {
+    throw new Error(`${target} upload completed without returning an id.`);
+  }
+
+  return { id: payload.id };
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function uploadChunk(
   uploadUrl: string,
   file: File,
-  onProgress: (progress: number) => void,
-): Promise<{ id: string }> {
+  start: number,
+  endExclusive: number,
+  onProgress: (uploadedBytes: number) => void,
+): Promise<{ status: number; responseText: string; range?: string | null }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    const chunk = file.slice(start, endExclusive);
+    const endInclusive = endExclusive - 1;
 
     xhr.open("PUT", uploadUrl);
     xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.setRequestHeader(
+      "Content-Range",
+      `bytes ${start}-${endInclusive}/${file.size}`,
+    );
 
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return;
-      onProgress(event.loaded / event.total);
+      onProgress(start + event.loaded);
     };
 
     xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(JSON.parse(xhr.responseText) as { id: string });
-        return;
-      }
-
-      reject(new Error(`Upload failed: ${xhr.status} ${xhr.responseText}`));
+      resolve({
+        status: xhr.status,
+        responseText: xhr.responseText,
+        range: xhr.getResponseHeader("Range"),
+      });
     };
 
     xhr.onerror = () => reject(new Error("Network error"));
-    xhr.send(file);
+    xhr.ontimeout = () => reject(new Error("Upload timed out"));
+    xhr.send(chunk);
   });
 }
 
-function uploadToYouTube(
+function nextStartFromRange(range: string | null | undefined, fallback: number) {
+  const match = range?.match(/bytes=0-(\d+)/);
+
+  if (!match) {
+    return fallback;
+  }
+
+  return Number(match[1]) + 1;
+}
+
+async function uploadResumable(
   uploadUrl: string,
   file: File,
+  target: UploadTarget,
   onProgress: (progress: number) => void,
 ): Promise<{ id: string }> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
+  let start = 0;
 
-    xhr.open("PUT", uploadUrl);
-    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+  while (start < file.size) {
+    const endExclusive = Math.min(start + uploadChunkBytes, file.size);
+    let lastError: Error | null = null;
 
-    xhr.upload.onprogress = (event) => {
-      if (!event.lengthComputable) return;
-      onProgress(event.loaded / event.total);
-    };
+    for (let attempt = 1; attempt <= maxChunkUploadRetries; attempt += 1) {
+      try {
+        const result = await uploadChunk(uploadUrl, file, start, endExclusive, (uploadedBytes) => {
+          onProgress(Math.min(uploadedBytes / file.size, 0.999));
+        });
 
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(JSON.parse(xhr.responseText) as { id: string });
-        return;
+        if (result.status >= 200 && result.status < 300) {
+          onProgress(1);
+          return parseUploadedId(result.responseText, target);
+        }
+
+        if (result.status === 308) {
+          start = nextStartFromRange(result.range, endExclusive);
+          onProgress(Math.min(start / file.size, 0.999));
+          lastError = null;
+          break;
+        }
+
+        throw new Error(`${target} upload failed: ${result.status} ${result.responseText}`);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(`${target} upload failed.`);
+
+        if (attempt < maxChunkUploadRetries) {
+          await sleep(750 * attempt);
+        }
       }
+    }
 
-      reject(new Error(`YouTube upload failed: ${xhr.status} ${xhr.responseText}`));
-    };
+    if (lastError) {
+      throw lastError;
+    }
+  }
 
-    xhr.onerror = () => reject(new Error("YouTube upload network error"));
-    xhr.send(file);
-  });
+  throw new Error(`${target} upload did not complete.`);
 }
 
 async function readJsonOrText(response: Response) {
@@ -209,9 +267,10 @@ export function UploadForm({ token }: UploadFormProps) {
       let driveFile: { id: string };
 
       try {
-        driveFile = await uploadToDrive(
+        driveFile = await uploadResumable(
           driveUploadUrl,
           file,
+          "Google Drive",
           setProgress,
         );
       } catch (directUploadError) {
@@ -257,7 +316,7 @@ export function UploadForm({ token }: UploadFormProps) {
       let youtubeVideo: { id: string } | null = null;
 
       if (youtubeUploadUrl) {
-        youtubeVideo = await uploadToYouTube(youtubeUploadUrl, file, (youtubeProgress) => {
+        youtubeVideo = await uploadResumable(youtubeUploadUrl, file, "YouTube", (youtubeProgress) => {
           setProgress(0.5 + youtubeProgress * 0.5);
         });
       }
