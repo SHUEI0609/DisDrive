@@ -412,9 +412,15 @@ async function createPdfPreviewWithPdfJs(input: {
   fileName: string;
   bytes: Buffer;
 }): Promise<PreviewResult> {
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const canvasPackageName = ["@napi-rs", "canvas"].join("/");
-  const { createCanvas } = nodeRequire(canvasPackageName) as typeof import("@napi-rs/canvas");
+  const canvas = nodeRequire(canvasPackageName) as typeof import("@napi-rs/canvas");
+  const globalScope = globalThis as Record<string, unknown>;
+
+  globalScope.DOMMatrix ??= canvas.DOMMatrix;
+  globalScope.ImageData ??= canvas.ImageData;
+  globalScope.Path2D ??= canvas.Path2D;
+
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const document = await pdfjs.getDocument({
     data: new Uint8Array(input.bytes),
     disableWorker: true,
@@ -426,15 +432,15 @@ async function createPdfPreviewWithPdfJs(input: {
     const baseViewport = page.getViewport({ scale: 1 });
     const scale = Math.min(2, 1400 / baseViewport.width);
     const viewport = page.getViewport({ scale });
-    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-    const context = canvas.getContext("2d");
+    const pageCanvas = canvas.createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const context = pageCanvas.getContext("2d");
 
     await page.render({
       canvasContext: context as never,
       viewport,
     } as never).promise;
 
-    const pngBytes = await canvas.encode("png");
+    const pngBytes = await pageCanvas.encode("png");
     const jpegPreview = await sharp(Buffer.from(pngBytes))
       .jpeg({
         quality: 78,
