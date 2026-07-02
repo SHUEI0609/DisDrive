@@ -69,26 +69,36 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     const refreshToken = await getGoogleRefreshTokenForUser(uploadSession.requester_id);
     const drive = createDriveClient(refreshToken);
-    const query = [
+    const baseQuery = [
       `name = '${escapeDriveQueryValue(file.display_name)}'`,
-      `mimeType = '${escapeDriveQueryValue(file.mime_type)}'`,
       "trashed = false",
+    ];
+    const folderQuery = [
+      ...baseQuery,
       ...(env.GOOGLE_DRIVE_ROOT_FOLDER_ID
         ? [`'${escapeDriveQueryValue(env.GOOGLE_DRIVE_ROOT_FOLDER_ID)}' in parents`]
         : []),
     ].join(" and ");
 
-    const response = await drive.files.list({
-      q: query,
-      orderBy: "createdTime desc",
-      pageSize: 10,
-      fields: "files(id,name,mimeType,size,createdTime)",
-    });
+    async function findRecoveredFile(query: string) {
+      const response = await drive.files.list({
+        q: query,
+        orderBy: "createdTime desc",
+        pageSize: 10,
+        fields: "files(id,name,mimeType,size,createdTime)",
+      });
 
-    const expectedSize = Number(file.size_bytes);
-    const recoveredFile = response.data.files?.find((candidate) => {
-      return Number(candidate.size ?? -1) === expectedSize;
-    });
+      const expectedSize = Number(file.size_bytes);
+      return response.data.files?.find((candidate) => {
+        return Number(candidate.size ?? -1) === expectedSize;
+      });
+    }
+
+    const recoveredFile =
+      (await findRecoveredFile(folderQuery)) ??
+      (env.GOOGLE_DRIVE_ROOT_FOLDER_ID
+        ? await findRecoveredFile(baseQuery.join(" and "))
+        : null);
 
     if (!recoveredFile?.id) {
       throw new AppError(
