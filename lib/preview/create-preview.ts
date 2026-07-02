@@ -1,13 +1,12 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import * as canvas from "@napi-rs/canvas";
 import sharp from "sharp";
 
 const execFileAsync = promisify(execFile);
-const nodeRequire = createRequire(import.meta.url);
 
 export type PreviewResult = {
   textPreview?: string;
@@ -412,8 +411,6 @@ async function createPdfPreviewWithPdfJs(input: {
   fileName: string;
   bytes: Buffer;
 }): Promise<PreviewResult> {
-  const canvasPackageName = ["@napi-rs", "canvas"].join("/");
-  const canvas = nodeRequire(canvasPackageName) as typeof import("@napi-rs/canvas");
   const globalScope = globalThis as Record<string, unknown>;
 
   globalScope.DOMMatrix ??= canvas.DOMMatrix;
