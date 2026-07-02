@@ -23,6 +23,29 @@ export async function postDiscordChannelMessage(
   return response.json() as Promise<{ id: string }>;
 }
 
+export async function postDiscordInteractionFollowup(
+  applicationId: string,
+  interactionToken: string,
+  payload: unknown,
+) {
+  const response = await fetch(
+    `https://discord.com/api/v10/webhooks/${applicationId}/${interactionToken}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Discord followup failed: ${await response.text()}`);
+  }
+
+  return response.json() as Promise<{ id: string }>;
+}
+
 export type DiscordUploadFile = {
   name: string;
   contentType: string;

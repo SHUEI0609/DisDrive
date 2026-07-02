@@ -1,5 +1,6 @@
 export type DiscordInteraction = {
   id: string;
+  application_id?: string;
   token: string;
   type: number;
   data?: {
@@ -37,6 +38,7 @@ export const InteractionType = {
 export const InteractionResponseType = {
   Pong: 1,
   ChannelMessageWithSource: 4,
+  DeferredChannelMessageWithSource: 5,
   UpdateMessage: 7,
 } as const;
 

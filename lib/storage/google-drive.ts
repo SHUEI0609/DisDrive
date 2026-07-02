@@ -41,6 +41,77 @@ export function createDriveClient(refreshToken: string) {
   });
 }
 
+function googleWorkspaceMimeTypeForOffice(input: {
+  fileName: string;
+  mimeType: string;
+}) {
+  const lowerName = input.fileName.toLowerCase();
+
+  if (
+    input.mimeType === "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
+    input.mimeType === "application/vnd.ms-powerpoint" ||
+    lowerName.endsWith(".pptx") ||
+    lowerName.endsWith(".ppt")
+  ) {
+    return "application/vnd.google-apps.presentation";
+  }
+
+  if (
+    input.mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    input.mimeType === "application/msword" ||
+    lowerName.endsWith(".docx") ||
+    lowerName.endsWith(".doc")
+  ) {
+    return "application/vnd.google-apps.document";
+  }
+
+  return null;
+}
+
+export async function exportDriveOfficeFileAsPdf(input: {
+  refreshToken: string;
+  driveFileId: string;
+  fileName: string;
+  mimeType: string;
+}) {
+  const googleMimeType = googleWorkspaceMimeTypeForOffice(input);
+
+  if (!googleMimeType) {
+    return null;
+  }
+
+  const drive = createDriveClient(input.refreshToken);
+  const converted = await drive.files.copy({
+    fileId: input.driveFileId,
+    requestBody: {
+      name: `${input.fileName}.preview`,
+      mimeType: googleMimeType,
+    },
+    fields: "id",
+  });
+  const convertedFileId = converted.data.id;
+
+  if (!convertedFileId) {
+    throw new Error("Google Drive did not return a converted document id.");
+  }
+
+  try {
+    const exported = await drive.files.export(
+      {
+        fileId: convertedFileId,
+        mimeType: "application/pdf",
+      },
+      {
+        responseType: "arraybuffer",
+      },
+    );
+
+    return Buffer.from(exported.data as ArrayBuffer);
+  } finally {
+    await drive.files.delete({ fileId: convertedFileId }).catch(() => undefined);
+  }
+}
+
 export class GoogleDriveStorageProvider implements StorageProvider {
   constructor(private readonly refreshToken: string) {}
 

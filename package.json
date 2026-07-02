@@ -10,10 +10,12 @@
     "register:commands": "tsx --env-file=.env.local scripts/register-discord-commands.ts"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.2",
     "@supabase/supabase-js": "latest",
     "googleapis": "latest",
     "next": "latest",
     "next-auth": "latest",
+    "pdfjs-dist": "^6.1.200",
     "react": "latest",
     "react-dom": "latest",
     "sharp": "latest",

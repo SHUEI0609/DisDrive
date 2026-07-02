@@ -1,8 +1,10 @@
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createUploadToken } from "@/lib/security/token";
 import { requireEnv, env } from "@/lib/env";
 import { buildDocumentPreviewMessage } from "@/lib/discord/preview-message";
+import { postDiscordInteractionFollowup } from "@/lib/discord/api";
+import { getGoogleRefreshTokenForUser } from "@/lib/google/accounts";
 import { verifyDiscordRequest } from "@/lib/discord/verify";
 import { readPreviewMeta, readPreviewPage } from "@/lib/preview/store";
 import {
@@ -61,7 +63,7 @@ async function handlePreviewPageButton(interaction: DiscordInteraction) {
   const supabase = createAdminClient();
   const { data: file, error } = await supabase
     .from("files")
-    .select("id, display_name, size_bytes, storage_key, uploader:users(discord_user_id)")
+    .select("id, display_name, size_bytes, storage_key, uploader_id, uploader:users(discord_user_id)")
     .eq("id", fileId)
     .single();
 
@@ -76,10 +78,11 @@ async function handlePreviewPageButton(interaction: DiscordInteraction) {
   }
 
   const uploader = Array.isArray(file.uploader) ? file.uploader[0] : file.uploader;
-  const meta = await readPreviewMeta(file.id);
+  const refreshToken = await getGoogleRefreshTokenForUser(file.uploader_id);
+  const meta = await readPreviewMeta(file.id, refreshToken);
   const page = Math.min(Math.max(requestedPage, 1), meta.totalPages);
 
-  const pageBytes = await readPreviewPage(file.id, page);
+  const pageBytes = await readPreviewPage(file.id, page, refreshToken);
 
   return multipartInteractionResponse({
     type: InteractionResponseType.UpdateMessage,
@@ -93,6 +96,125 @@ async function handlePreviewPageButton(interaction: DiscordInteraction) {
       totalPages: meta.totalPages,
     }),
   }, pageBytes);
+}
+
+async function createUploadUrlResponse(interaction: DiscordInteraction) {
+  const discordUser = interaction.member?.user ?? interaction.user;
+
+  if (!discordUser?.id || !interaction.guild_id || !interaction.channel_id) {
+    return {
+      flags: MessageFlags.Ephemeral,
+      content: "サーバー内のチャンネルから実行してください。",
+    };
+  }
+
+  const supabase = createAdminClient();
+  const ttlMinutes = env.UPLOAD_TOKEN_TTL_MINUTES;
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+  const { rawToken, tokenHash } = createUploadToken();
+
+  const { data: user, error: userError } = await supabase
+    .from("users")
+    .upsert(
+      {
+        discord_user_id: discordUser.id,
+        username: discordUser.username ?? `user-${discordUser.id}`,
+        avatar_url: discordUser.avatar
+          ? `https://cdn.discordapp.com/avatars/${discordUser.id}/${discordUser.avatar}.png`
+          : null,
+      },
+      { onConflict: "discord_user_id" },
+    )
+    .select("id")
+    .single();
+
+  if (userError) throw userError;
+
+  const { data: guild, error: guildError } = await supabase
+    .from("guilds")
+    .upsert(
+      {
+        discord_guild_id: interaction.guild_id,
+        name: `guild-${interaction.guild_id}`,
+      },
+      { onConflict: "discord_guild_id" },
+    )
+    .select("id")
+    .single();
+
+  if (guildError) throw guildError;
+
+  const { data: channel, error: channelError } = await supabase
+    .from("channels")
+    .upsert(
+      {
+        guild_id: guild.id,
+        discord_channel_id: interaction.channel_id,
+        name: `channel-${interaction.channel_id}`,
+      },
+      { onConflict: "discord_channel_id" },
+    )
+    .select("id")
+    .single();
+
+  if (channelError) throw channelError;
+
+  const visibility = String(optionValue(interaction, "visibility") ?? "channel");
+  const description = optionValue(interaction, "description");
+
+  const { error: sessionError } = await supabase.from("upload_sessions").insert({
+    requester_id: user.id,
+    guild_id: guild.id,
+    channel_id: channel.id,
+    token_hash: tokenHash,
+    visibility: ["uploader", "channel", "guild"].includes(visibility)
+      ? visibility
+      : "channel",
+    description: typeof description === "string" ? description : null,
+    expires_at: expiresAt,
+  });
+
+  if (sessionError) throw sessionError;
+
+  const uploadUrl = `${env.APP_URL}/upload/${rawToken}`;
+
+  return {
+    flags: MessageFlags.Ephemeral,
+    content: `アップロードURLを発行しました。このリンクは${ttlMinutes}分間有効です。`,
+    components: [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: 5,
+            label: "ファイルをアップロード",
+            url: uploadUrl,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+async function postUploadUrlFollowup(interaction: DiscordInteraction) {
+  const applicationId = interaction.application_id ?? env.DISCORD_APPLICATION_ID;
+
+  if (!applicationId) {
+    throw new Error("Missing Discord application id for followup response.");
+  }
+
+  try {
+    const data = await createUploadUrlResponse(interaction);
+    await postDiscordInteractionFollowup(applicationId, interaction.token, data);
+  } catch (error) {
+    console.error(error);
+    await postDiscordInteractionFollowup(applicationId, interaction.token, {
+      flags: MessageFlags.Ephemeral,
+      content:
+        "アップロードURLの発行に失敗しました。サーバー設定とSupabase接続を確認してください。",
+    });
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -147,9 +269,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const discordUser = interaction.member?.user ?? interaction.user;
-
-    if (!discordUser?.id || !interaction.guild_id || !interaction.channel_id) {
+    if (!interaction.member?.user?.id && !interaction.user?.id) {
       return NextResponse.json({
         type: InteractionResponseType.ChannelMessageWithSource,
         data: {
@@ -159,94 +279,12 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const supabase = createAdminClient();
-    const ttlMinutes = env.UPLOAD_TOKEN_TTL_MINUTES;
-    const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
-    const { rawToken, tokenHash } = createUploadToken();
-
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .upsert(
-        {
-          discord_user_id: discordUser.id,
-          username: discordUser.username ?? `user-${discordUser.id}`,
-          avatar_url: discordUser.avatar
-            ? `https://cdn.discordapp.com/avatars/${discordUser.id}/${discordUser.avatar}.png`
-            : null,
-        },
-        { onConflict: "discord_user_id" },
-      )
-      .select("id")
-      .single();
-
-    if (userError) throw userError;
-
-    const { data: guild, error: guildError } = await supabase
-      .from("guilds")
-      .upsert(
-        {
-          discord_guild_id: interaction.guild_id,
-          name: `guild-${interaction.guild_id}`,
-        },
-        { onConflict: "discord_guild_id" },
-      )
-      .select("id")
-      .single();
-
-    if (guildError) throw guildError;
-
-    const { data: channel, error: channelError } = await supabase
-      .from("channels")
-      .upsert(
-        {
-          guild_id: guild.id,
-          discord_channel_id: interaction.channel_id,
-          name: `channel-${interaction.channel_id}`,
-        },
-        { onConflict: "discord_channel_id" },
-      )
-      .select("id")
-      .single();
-
-    if (channelError) throw channelError;
-
-    const visibility = String(optionValue(interaction, "visibility") ?? "channel");
-    const description = optionValue(interaction, "description");
-
-    const { error: sessionError } = await supabase.from("upload_sessions").insert({
-      requester_id: user.id,
-      guild_id: guild.id,
-      channel_id: channel.id,
-      token_hash: tokenHash,
-      visibility: ["uploader", "channel", "guild"].includes(visibility)
-        ? visibility
-        : "channel",
-      description: typeof description === "string" ? description : null,
-      expires_at: expiresAt,
-    });
-
-    if (sessionError) throw sessionError;
-
-    const uploadUrl = `${env.APP_URL}/upload/${rawToken}`;
+    after(() => postUploadUrlFollowup(interaction));
 
     return NextResponse.json({
-      type: InteractionResponseType.ChannelMessageWithSource,
+      type: InteractionResponseType.DeferredChannelMessageWithSource,
       data: {
         flags: MessageFlags.Ephemeral,
-        content: `アップロードURLを発行しました。このリンクは${ttlMinutes}分間有効です。`,
-        components: [
-          {
-            type: 1,
-            components: [
-              {
-                type: 2,
-                style: 5,
-                label: "ファイルをアップロード",
-                url: uploadUrl,
-              },
-            ],
-          },
-        ],
       },
     });
   } catch (error) {

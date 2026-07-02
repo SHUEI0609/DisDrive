@@ -1,11 +1,13 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import sharp from "sharp";
 
 const execFileAsync = promisify(execFile);
+const nodeRequire = createRequire(import.meta.url);
 
 export type PreviewResult = {
   textPreview?: string;
@@ -23,8 +25,6 @@ export type PreviewResult = {
 };
 
 const maxDiscordPreviewBytes = 8 * 1024 * 1024;
-const maxDocumentPreviewPages = 20;
-
 function isLikelyText(mimeType: string, fileName: string) {
   const lowerName = fileName.toLowerCase();
 
@@ -267,6 +267,13 @@ async function createQuickLookPreview(input: {
   fileName: string;
   bytes: Buffer;
 }): Promise<PreviewResult> {
+  if (!(await commandExists("qlmanage"))) {
+    return {
+      files: [],
+      note: "この環境ではこのファイル形式のプレビューを生成できませんでした。",
+    };
+  }
+
   const workDir = await mkdtemp(path.join(tmpdir(), "cloudbot-ql-"));
   const inputPath = path.join(workDir, input.fileName);
   const outputDir = path.join(workDir, "out");
@@ -359,12 +366,12 @@ async function readPreviewImages(
   );
 }
 
-async function createPdfPreview(input: {
+export async function createPdfPreview(input: {
   fileName: string;
   bytes: Buffer;
 }): Promise<PreviewResult> {
   if (!(await commandExists("pdftoppm"))) {
-    return createQuickLookPreview(input);
+    return createPdfPreviewWithPdfJs(input);
   }
 
   const workDir = await mkdtemp(path.join(tmpdir(), "cloudbot-pdf-"));
@@ -379,12 +386,10 @@ async function createPdfPreview(input: {
       "120",
       "-f",
       "1",
-      "-l",
-      String(maxDocumentPreviewPages),
       inputPath,
       outputPrefix,
     ], {
-      timeout: 60_000,
+      timeout: 180_000,
     });
 
     const pages = await readPreviewImages(workDir);
@@ -396,14 +401,59 @@ async function createPdfPreview(input: {
     return {
       files: [],
       pages,
-      note:
-        pages.length >= maxDocumentPreviewPages
-          ? `先頭${maxDocumentPreviewPages}ページまでプレビューできます。`
-          : undefined,
+      note: `${pages.length}ページすべてをプレビューできます。`,
     };
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
+}
+
+async function createPdfPreviewWithPdfJs(input: {
+  fileName: string;
+  bytes: Buffer;
+}): Promise<PreviewResult> {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const canvasPackageName = ["@napi-rs", "canvas"].join("/");
+  const { createCanvas } = nodeRequire(canvasPackageName) as typeof import("@napi-rs/canvas");
+  const document = await pdfjs.getDocument({
+    data: new Uint8Array(input.bytes),
+    disableWorker: true,
+  } as never).promise;
+  const pages: NonNullable<PreviewResult["pages"]> = [];
+
+  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+    const page = await document.getPage(pageNumber);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const scale = Math.min(2, 1400 / baseViewport.width);
+    const viewport = page.getViewport({ scale });
+    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const context = canvas.getContext("2d");
+
+    await page.render({
+      canvasContext: context as never,
+      viewport,
+    } as never).promise;
+
+    const pngBytes = await canvas.encode("png");
+    const jpegPreview = await sharp(Buffer.from(pngBytes))
+      .jpeg({
+        quality: 78,
+        mozjpeg: true,
+      })
+      .toBuffer();
+
+    pages.push({
+      name: `document-preview-${pageNumber}.jpg`,
+      contentType: "image/jpeg",
+      bytes: jpegPreview,
+    });
+  }
+
+  return {
+    files: [],
+    pages,
+    note: `${pages.length}ページすべてをプレビューできます。`,
+  };
 }
 
 async function createOfficeDocumentPreview(input: {
@@ -435,7 +485,7 @@ async function createOfficeDocumentPreview(input: {
       pdfDir,
       inputPath,
     ], {
-      timeout: 60_000,
+      timeout: 180_000,
     });
 
     const outputs = await readdir(pdfDir);

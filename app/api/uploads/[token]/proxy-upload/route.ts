@@ -9,7 +9,7 @@ import {
 import { formatBytes } from "@/lib/files/format";
 import { getGoogleRefreshTokenForUser } from "@/lib/google/accounts";
 import { buildDocumentPreviewMessage } from "@/lib/discord/preview-message";
-import { createDiscordPreview } from "@/lib/preview/create-preview";
+import { createDriveBackedPreview } from "@/lib/preview/drive-preview";
 import { savePreviewPages } from "@/lib/preview/store";
 import { createSignedFileToken } from "@/lib/security/signed-file-token";
 import { hashUploadToken } from "@/lib/security/token";
@@ -132,12 +132,22 @@ export async function POST(request: NextRequest, context: RouteContext) {
     let discordMessageId: string | null = null;
 
     if (channel?.discord_channel_id) {
-      const preview = youtubeUpload
+      let preview = youtubeUpload
         ? { files: [], textPreview: undefined, pages: undefined, note: undefined }
-        : await createDiscordPreview({
+        : await createDriveBackedPreview({
+            refreshToken,
+            driveFileId: uploaded.storageKey,
             fileName: file.name,
             mimeType,
-            bytes,
+            fallbackBytes: bytes,
+          }).catch((error) => {
+            console.error("Preview generation failed", error);
+            return {
+              files: [],
+              textPreview: undefined,
+              pages: undefined,
+              note: "プレビュー生成に失敗しました。ファイル本体はDriveに保存済みです。",
+            };
           });
       const contentLines = [
           "ファイルを保存しました",
@@ -231,7 +241,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       }
 
       if (preview.pages?.length) {
-        const meta = await savePreviewPages(storedFile.id, preview.pages);
+        const meta = await savePreviewPages(storedFile.id, preview.pages, refreshToken);
 
         payload = buildDocumentPreviewMessage({
           fileId: storedFile.id,

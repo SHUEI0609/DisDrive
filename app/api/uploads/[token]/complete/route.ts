@@ -3,12 +3,18 @@ import { z } from "zod";
 import { auth } from "@/lib/auth/auth";
 import { AppError, errorResponse } from "@/lib/errors";
 import { env } from "@/lib/env";
-import { postDiscordChannelMessage } from "@/lib/discord/api";
+import {
+  postDiscordChannelMessage,
+  postDiscordChannelMessageWithFiles,
+} from "@/lib/discord/api";
+import { buildDocumentPreviewMessage } from "@/lib/discord/preview-message";
 import { formatBytes } from "@/lib/files/format";
 import { getGoogleRefreshTokenForUser } from "@/lib/google/accounts";
 import { hashUploadToken } from "@/lib/security/token";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getStorageProvider } from "@/lib/storage";
+import { createDriveBackedPreview } from "@/lib/preview/drive-preview";
+import { savePreviewPages } from "@/lib/preview/store";
 
 type RouteContext = {
   params: Promise<{
@@ -99,8 +105,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       const youtubeUrl = input.youtubeVideoId
         ? `https://youtu.be/${input.youtubeVideoId}`
         : null;
-      const message = await postDiscordChannelMessage(channel.discord_channel_id, {
-        content: [
+      const contentLines = [
           "ファイルを保存しました",
           `ファイル名: ${file.display_name}`,
           `サイズ: ${formatBytes(file.size_bytes)}`,
@@ -109,7 +114,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
           ...(input.youtubeUploadError
             ? ["", `YouTubeアップロード失敗: ${input.youtubeUploadError}`]
             : []),
-        ].join("\n"),
+        ];
+      const driveUrl = `https://drive.google.com/file/d/${input.driveFileId}/view`;
+      let payload: unknown = {
+        content: contentLines.join("\n"),
         components: [
           {
             type: 1,
@@ -134,12 +142,75 @@ export async function POST(request: NextRequest, context: RouteContext) {
                 type: 2,
                 style: 5,
                 label: "Driveで開く",
-                url: `https://drive.google.com/file/d/${input.driveFileId}/view`,
+                url: driveUrl,
               },
             ],
           },
         ],
-      });
+      };
+      let filesToSend: Array<{ name: string; contentType: string; bytes: Buffer }> = [];
+
+      if (!youtubeUrl) {
+        try {
+          const preview = await createDriveBackedPreview({
+            refreshToken,
+            driveFileId: input.driveFileId,
+            fileName: file.display_name,
+            mimeType: metadata.mimeType,
+          });
+            if (preview.note) {
+              contentLines.push(`プレビュー: ${preview.note}`);
+            }
+
+            if (preview.textPreview) {
+              contentLines.push("", "プレビュー:");
+              contentLines.push(`\`\`\`\n${preview.textPreview.replace(/```/g, "'''")}\n\`\`\``);
+            }
+
+            if (preview.pages?.length) {
+              const meta = await savePreviewPages(file.id, preview.pages, refreshToken);
+
+              payload = buildDocumentPreviewMessage({
+                fileId: file.id,
+                fileName: file.display_name,
+                sizeBytes: file.size_bytes,
+                discordUserId: session.discordUserId,
+                driveFileId: input.driveFileId,
+                page: 1,
+                totalPages: meta.totalPages,
+                note: preview.note,
+              });
+              filesToSend = [
+                {
+                  name: "preview.jpg",
+                  contentType: "image/jpeg",
+                  bytes: preview.pages[0].bytes,
+                },
+              ];
+            } else {
+              payload = {
+                ...(payload as Record<string, unknown>),
+                content: contentLines.join("\n"),
+              };
+              filesToSend = preview.files;
+            }
+        } catch (error) {
+          console.error("Preview generation failed", error);
+          contentLines.push("プレビュー: 生成に失敗しました。ファイル本体はDriveに保存済みです。");
+          payload = {
+            ...(payload as Record<string, unknown>),
+            content: contentLines.join("\n"),
+          };
+        }
+      }
+
+      const message = filesToSend.length
+        ? await postDiscordChannelMessageWithFiles(
+            channel.discord_channel_id,
+            payload,
+            filesToSend,
+          )
+        : await postDiscordChannelMessage(channel.discord_channel_id, payload);
       discordMessageId = message.id;
     }
 
