@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getGoogleRefreshTokenForUser } from "@/lib/google/accounts";
-import { readPreviewPage } from "@/lib/preview/store";
+import { readPreviewPage, readPreviewPageByDriveFileId } from "@/lib/preview/store";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 type RouteContext = {
@@ -12,10 +12,11 @@ type RouteContext = {
 
 export const runtime = "nodejs";
 
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
   try {
     const { fileId, page } = await context.params;
     const pageNumber = Number(page.replace(/\.jpe?g$/i, ""));
+    const previewDriveFileId = new URL(request.url).searchParams.get("pid");
     const supabase = createAdminClient();
     const { data: file, error } = await supabase
       .from("files")
@@ -29,14 +30,16 @@ export async function GET(_request: Request, context: RouteContext) {
     }
 
     const refreshToken = await getGoogleRefreshTokenForUser(file.uploader_id);
-    const bytes = await readPreviewPage(fileId, pageNumber, refreshToken);
+    const bytes = previewDriveFileId
+      ? await readPreviewPageByDriveFileId(previewDriveFileId, refreshToken)
+      : await readPreviewPage(fileId, pageNumber, refreshToken);
 
-    return new NextResponse(bytes, {
+    return new NextResponse(new Uint8Array(bytes), {
       headers: {
         "Content-Type": "image/jpeg",
         "Content-Length": String(bytes.byteLength),
         "Content-Disposition": `inline; filename="preview-${pageNumber}.jpg"`,
-        "Cache-Control": "no-store",
+        "Cache-Control": "public, max-age=31536000, immutable",
       },
     });
   } catch {

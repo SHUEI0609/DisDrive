@@ -179,6 +179,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
                 page: 1,
                 totalPages: meta.totalPages,
                 note: preview.note,
+                previewPageIds: meta.pageFileIds,
               });
               filesToSend = [
                 {

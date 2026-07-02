@@ -4,12 +4,16 @@ import { createDriveClient } from "@/lib/storage/google-drive";
 
 export type StoredPreviewMeta = {
   totalPages: number;
+  pageFileIds?: string[];
 };
 
 export type PreviewPageInput = {
   bytes: Buffer;
   contentType: string;
 };
+
+const previewMemoryCache = new Map<string, Buffer>();
+const previewMetaCache = new Map<string, StoredPreviewMeta>();
 
 function safeFileId(fileId: string) {
   if (!/^[0-9a-f-]{36}$/i.test(fileId)) {
@@ -168,19 +172,8 @@ export async function savePreviewPages(
   refreshToken: string,
 ) {
   const folderId = await filePreviewFolder(fileId, refreshToken);
-  const meta: StoredPreviewMeta = {
-    totalPages: pages.length,
-  };
-
-  await Promise.all([
-    uploadPreviewFile({
-      refreshToken,
-      folderId,
-      name: "meta.json",
-      contentType: "application/json",
-      bytes: Buffer.from(JSON.stringify(meta), "utf8"),
-    }),
-    ...pages.map((page, index) =>
+  const pageFileIds = await Promise.all(
+    pages.map((page, index) =>
       uploadPreviewFile({
         refreshToken,
         folderId,
@@ -189,7 +182,22 @@ export async function savePreviewPages(
         bytes: page.bytes,
       }),
     ),
-  ]);
+  );
+
+  const meta: StoredPreviewMeta = {
+    totalPages: pages.length,
+    pageFileIds,
+  };
+
+  await uploadPreviewFile({
+    refreshToken,
+    folderId,
+    name: "meta.json",
+    contentType: "application/json",
+    bytes: Buffer.from(JSON.stringify(meta), "utf8"),
+  });
+
+  previewMetaCache.set(fileId, meta);
 
   return meta;
 }
@@ -198,8 +206,14 @@ export async function readPreviewMeta(
   fileId: string,
   refreshToken: string,
 ): Promise<StoredPreviewMeta> {
+  const cached = previewMetaCache.get(fileId);
+  if (cached) return cached;
+
   const raw = await readPreviewFileByName(fileId, refreshToken, "meta.json");
-  return JSON.parse(raw.toString("utf8")) as StoredPreviewMeta;
+  const meta = JSON.parse(raw.toString("utf8")) as StoredPreviewMeta;
+  previewMetaCache.set(fileId, meta);
+
+  return meta;
 }
 
 async function readPreviewFileByName(fileId: string, refreshToken: string, name: string) {
@@ -229,5 +243,32 @@ async function readPreviewFileByName(fileId: string, refreshToken: string, name:
 }
 
 export async function readPreviewPage(fileId: string, page: number, refreshToken: string) {
+  const meta = await readPreviewMeta(fileId, refreshToken);
+  const driveFileId = meta.pageFileIds?.[safePage(page) - 1];
+
+  if (driveFileId) {
+    return readPreviewPageByDriveFileId(driveFileId, refreshToken);
+  }
+
   return readPreviewFileByName(fileId, refreshToken, `page-${safePage(page)}.jpg`);
+}
+
+export async function readPreviewPageByDriveFileId(driveFileId: string, refreshToken: string) {
+  const cached = previewMemoryCache.get(driveFileId);
+  if (cached) return cached;
+
+  const drive = createDriveClient(refreshToken);
+  const response = await drive.files.get(
+    {
+      fileId: driveFileId,
+      alt: "media",
+    },
+    {
+      responseType: "arraybuffer",
+    },
+  );
+  const bytes = Buffer.from(response.data as ArrayBuffer);
+  previewMemoryCache.set(driveFileId, bytes);
+
+  return bytes;
 }

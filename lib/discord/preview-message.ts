@@ -11,11 +11,20 @@ type BuildPreviewMessageInput = {
   totalPages: number;
   note?: string;
   imageUrl?: string;
+  previewPageIds?: string[];
 };
 
 export function buildDocumentPreviewMessage(input: BuildPreviewMessageInput) {
   const page = Math.min(Math.max(input.page, 1), input.totalPages);
   const previewUrl = input.imageUrl ?? "attachment://preview.jpg";
+  const previousPageId = input.previewPageIds?.[page - 2];
+  const nextPageId = input.previewPageIds?.[page];
+  const customId = (targetPage: number, previewPageId?: string) => {
+    const base = `preview:${input.fileId}:${targetPage}:${input.totalPages}`;
+    const withPageId = previewPageId ? `${base}:${previewPageId}` : base;
+
+    return withPageId.length <= 100 ? withPageId : base;
+  };
   const contentLines = [
     "ファイルを保存しました",
     `ファイル名: ${input.fileName}`,
@@ -53,14 +62,14 @@ export function buildDocumentPreviewMessage(input: BuildPreviewMessageInput) {
             type: 2,
             style: 2,
             label: "前へ",
-            custom_id: `preview:${input.fileId}:${page - 1}:${input.totalPages}`,
+            custom_id: customId(page - 1, previousPageId),
             disabled: page <= 1,
           },
           {
             type: 2,
             style: 2,
             label: "次へ",
-            custom_id: `preview:${input.fileId}:${page + 1}:${input.totalPages}`,
+            custom_id: customId(page + 1, nextPageId),
             disabled: page >= input.totalPages,
           },
         ],
