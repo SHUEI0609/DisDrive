@@ -6,7 +6,7 @@ import { buildDocumentPreviewMessage } from "@/lib/discord/preview-message";
 import { postDiscordInteractionFollowup } from "@/lib/discord/api";
 import { getGoogleRefreshTokenForUser } from "@/lib/google/accounts";
 import { verifyDiscordRequest } from "@/lib/discord/verify";
-import { readPreviewMeta, readPreviewPage } from "@/lib/preview/store";
+import { readPreviewMeta } from "@/lib/preview/store";
 import {
   InteractionResponseType,
   InteractionType,
@@ -23,21 +23,11 @@ function optionValue(
   return interaction.data?.options?.find((option) => option.name === name)?.value;
 }
 
-function multipartInteractionResponse(payload: unknown, file: Buffer) {
-  const formData = new FormData();
-  const arrayBuffer = file.buffer.slice(
-    file.byteOffset,
-    file.byteOffset + file.byteLength,
-  ) as ArrayBuffer;
+function pageCountFromMessageContent(content?: string) {
+  const match = content?.match(/プレビュー:\s*\d+\s*\/\s*(\d+)\s*ページ/);
+  const pageCount = match ? Number(match[1]) : NaN;
 
-  formData.set("payload_json", JSON.stringify(payload));
-  formData.set(
-    "files[0]",
-    new Blob([arrayBuffer], { type: "image/jpeg" }),
-    "preview.jpg",
-  );
-
-  return new Response(formData);
+  return Number.isInteger(pageCount) && pageCount > 0 ? pageCount : null;
 }
 
 async function handlePreviewPageButton(interaction: DiscordInteraction) {
@@ -47,8 +37,9 @@ async function handlePreviewPageButton(interaction: DiscordInteraction) {
     return null;
   }
 
-  const [, fileId, rawPage] = customId.split(":");
+  const [, fileId, rawPage, rawTotalPages] = customId.split(":");
   const requestedPage = Number(rawPage);
+  const totalPagesFromCustomId = Number(rawTotalPages);
 
   if (!fileId || !Number.isInteger(requestedPage)) {
     return {
@@ -78,13 +69,20 @@ async function handlePreviewPageButton(interaction: DiscordInteraction) {
   }
 
   const uploader = Array.isArray(file.uploader) ? file.uploader[0] : file.uploader;
-  const refreshToken = await getGoogleRefreshTokenForUser(file.uploader_id);
-  const meta = await readPreviewMeta(file.id, refreshToken);
-  const page = Math.min(Math.max(requestedPage, 1), meta.totalPages);
+  let totalPages =
+    Number.isInteger(totalPagesFromCustomId) && totalPagesFromCustomId > 0
+      ? totalPagesFromCustomId
+      : pageCountFromMessageContent(interaction.message?.content);
 
-  const pageBytes = await readPreviewPage(file.id, page, refreshToken);
+  if (!totalPages) {
+    const refreshToken = await getGoogleRefreshTokenForUser(file.uploader_id);
+    const meta = await readPreviewMeta(file.id, refreshToken);
+    totalPages = meta.totalPages;
+  }
 
-  return multipartInteractionResponse({
+  const page = Math.min(Math.max(requestedPage, 1), totalPages);
+
+  return {
     type: InteractionResponseType.UpdateMessage,
     data: buildDocumentPreviewMessage({
       fileId: file.id,
@@ -93,9 +91,10 @@ async function handlePreviewPageButton(interaction: DiscordInteraction) {
       discordUserId: uploader?.discord_user_id ?? "unknown",
       driveFileId: file.storage_key,
       page,
-      totalPages: meta.totalPages,
+      totalPages,
+      imageUrl: `${env.APP_URL}/api/files/${file.id}/preview/${page}.jpg?v=${Date.now()}`,
     }),
-  }, pageBytes);
+  };
 }
 
 async function createUploadUrlResponse(interaction: DiscordInteraction) {

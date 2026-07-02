@@ -44,7 +44,7 @@ export function buildDocumentPreviewMessage(input: BuildPreviewMessageInput) {
             filename: "preview.jpg",
           },
         ]
-      : undefined,
+      : [],
     components: [
       {
         type: 1,
@@ -53,14 +53,14 @@ export function buildDocumentPreviewMessage(input: BuildPreviewMessageInput) {
             type: 2,
             style: 2,
             label: "前へ",
-            custom_id: `preview:${input.fileId}:${page - 1}`,
+            custom_id: `preview:${input.fileId}:${page - 1}:${input.totalPages}`,
             disabled: page <= 1,
           },
           {
             type: 2,
             style: 2,
             label: "次へ",
-            custom_id: `preview:${input.fileId}:${page + 1}`,
+            custom_id: `preview:${input.fileId}:${page + 1}:${input.totalPages}`,
             disabled: page >= input.totalPages,
           },
         ],

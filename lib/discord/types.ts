@@ -27,6 +27,9 @@ export type DiscordInteraction = {
   };
   guild_id?: string;
   channel_id?: string;
+  message?: {
+    content?: string;
+  };
 };
 
 export const InteractionType = {
