@@ -78,11 +78,22 @@ async function ensureFolder(input: {
 }
 
 async function previewRootFolder(refreshToken: string) {
-  return ensureFolder({
-    refreshToken,
-    name: ".cloudbot-previews",
-    parentId: env.GOOGLE_DRIVE_ROOT_FOLDER_ID,
-  });
+  try {
+    return await ensureFolder({
+      refreshToken,
+      name: ".cloudbot-previews",
+      parentId: env.GOOGLE_DRIVE_ROOT_FOLDER_ID,
+    });
+  } catch (error) {
+    if (!env.GOOGLE_DRIVE_ROOT_FOLDER_ID) {
+      throw error;
+    }
+
+    return ensureFolder({
+      refreshToken,
+      name: ".cloudbot-previews",
+    });
+  }
 }
 
 async function filePreviewFolder(fileId: string, refreshToken: string) {

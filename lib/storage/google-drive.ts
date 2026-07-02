@@ -41,6 +41,10 @@ export function createDriveClient(refreshToken: string) {
   });
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function googleWorkspaceMimeTypeForOffice(input: {
   fileName: string;
   mimeType: string;
@@ -96,17 +100,30 @@ export async function exportDriveOfficeFileAsPdf(input: {
   }
 
   try {
-    const exported = await drive.files.export(
-      {
-        fileId: convertedFileId,
-        mimeType: "application/pdf",
-      },
-      {
-        responseType: "arraybuffer",
-      },
-    );
+    let lastError: unknown;
 
-    return Buffer.from(exported.data as ArrayBuffer);
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      try {
+        const exported = await drive.files.export(
+          {
+            fileId: convertedFileId,
+            mimeType: "application/pdf",
+          },
+          {
+            responseType: "arraybuffer",
+          },
+        );
+
+        return Buffer.from(exported.data as ArrayBuffer);
+      } catch (error) {
+        lastError = error;
+        await sleep(1000 * attempt);
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("Google Drive PDF export failed.");
   } finally {
     await drive.files.delete({ fileId: convertedFileId }).catch(() => undefined);
   }

@@ -196,7 +196,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
             }
         } catch (error) {
           console.error("Preview generation failed", error);
-          contentLines.push("プレビュー: 生成に失敗しました。ファイル本体はDriveに保存済みです。");
+          const detail = error instanceof Error ? ` 詳細: ${error.message.slice(0, 180)}` : "";
+          contentLines.push(`プレビュー: 生成に失敗しました。ファイル本体はDriveに保存済みです。${detail}`);
           payload = {
             ...(payload as Record<string, unknown>),
             content: contentLines.join("\n"),

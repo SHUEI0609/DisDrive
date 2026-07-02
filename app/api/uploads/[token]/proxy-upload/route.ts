@@ -142,11 +142,12 @@ export async function POST(request: NextRequest, context: RouteContext) {
             fallbackBytes: bytes,
           }).catch((error) => {
             console.error("Preview generation failed", error);
+            const detail = error instanceof Error ? ` 詳細: ${error.message.slice(0, 180)}` : "";
             return {
               files: [],
               textPreview: undefined,
               pages: undefined,
-              note: "プレビュー生成に失敗しました。ファイル本体はDriveに保存済みです。",
+              note: `プレビュー生成に失敗しました。ファイル本体はDriveに保存済みです。${detail}`,
             };
           });
       const contentLines = [
