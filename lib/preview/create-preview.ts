@@ -23,6 +23,9 @@ export type PreviewResult = {
   note?: string;
 };
 
+type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
+type PdfJsWorkerModule = typeof import("pdfjs-dist/legacy/build/pdf.worker.mjs");
+
 const maxDiscordPreviewBytes = 8 * 1024 * 1024;
 function isLikelyText(mimeType: string, fileName: string) {
   const lowerName = fileName.toLowerCase();
@@ -417,7 +420,12 @@ async function createPdfPreviewWithPdfJs(input: {
   globalScope.ImageData ??= canvas.ImageData;
   globalScope.Path2D ??= canvas.Path2D;
 
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const [pdfjs, pdfjsWorker]: [PdfJsModule, PdfJsWorkerModule] = await Promise.all([
+    import("pdfjs-dist/legacy/build/pdf.mjs"),
+    import("pdfjs-dist/legacy/build/pdf.worker.mjs"),
+  ]);
+  globalScope.pdfjsWorker ??= pdfjsWorker;
+
   const document = await pdfjs.getDocument({
     data: new Uint8Array(input.bytes),
     disableWorker: true,
